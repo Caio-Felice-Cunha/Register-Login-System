@@ -1,62 +1,79 @@
-from tokenize import Token
-from fastapi import FastAPI
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base
-from sqlalchemy.orm import sessionmaker
-from models import *
+"""FastAPI register/login endpoints.
+
+Credentials are sent in the JSON request body (not query params, so they do not
+leak into URLs or access logs). Passwords are stored as salted PBKDF2 hashes.
+"""
+
+from datetime import datetime, timezone
 from secrets import token_hex
 
-app = FastAPI()
+from fastapi import Depends, FastAPI
+from pydantic import BaseModel
+from sqlalchemy.orm import Session as OrmSession
+
+from models import Person, Session, Tokens
+from security import hash_password, verify_password
+
+app = FastAPI(title="Register-Login-System")
 
 
-def connectDB():
-    engine = create_engine(CONN, echo = True)
-    Session = sessionmaker(bind = engine)
-    return Session()
-
-@app.post('/register')
-def register(name: str, user: str, passwd: str):
-    session = connectDB()
-    existing_user = session.query(Person).filter_by(user=user, passwd=passwd).all()
-    if len(existing_user) == 0:
-        x = Person(name=name, user=user, passwd=passwd)
-        session.add(x)
-        session.commit()
-        return {'status': 'success'}
-    elif len(existing_user) > 0:
-        return {'status': 'User already registered'}
+def get_session():
+    """Yield a database session and always close it afterwards."""
+    session = Session()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
-@app.post('/login')
-def login(user: str, passwd: str):
-    session = connectDB()
-    users = session.query(Person).filter_by(user = user, passwd = passwd).all()
+class RegisterRequest(BaseModel):
+    name: str
+    user: str
+    passwd: str
 
-    if len(users) == 0:
-        return {'status': 'user not registered' } 
 
+class LoginRequest(BaseModel):
+    user: str
+    passwd: str
+
+
+@app.post("/register")
+def register(body: RegisterRequest, session: OrmSession = Depends(get_session)):
+    # Existence check is by username only: the same user cannot be registered
+    # twice regardless of the password supplied.
+    existing_user = session.query(Person).filter_by(user=body.user).first()
+    if existing_user is not None:
+        return {"status": "User already registered"}
+
+    person = Person(
+        name=body.name,
+        user=body.user,
+        passwd=hash_password(body.passwd),
+    )
+    session.add(person)
+    session.commit()
+    return {"status": "success"}
+
+
+@app.post("/login")
+def login(body: LoginRequest, session: OrmSession = Depends(get_session)):
+    person = session.query(Person).filter_by(user=body.user).first()
+    if person is None or not verify_password(body.passwd, person.passwd):
+        return {"status": "user not registered"}
+
+    # Generate a token that does not already exist.
     while True:
         token = token_hex(50)
-        existingToken = session.query(Tokens).filter_by(token=token).all()
-
-        if len(existingToken) == 0:
-            existingPerson = session.query(Tokens).filter_by(id_person = users[0].id).all()
-            
-            if len(existingPerson) == 0:
-                newToken = Tokens(id_person = users[0].id, token=token)
-                session.add(newToken)
-
-            elif len(existingPerson) > 0:
-                existingPerson[0].token = token
-
-            session.commit()
+        if session.query(Tokens).filter_by(token=token).first() is None:
             break
 
-    return token
+    existing_token = session.query(Tokens).filter_by(id_person=person.id).first()
+    if existing_token is None:
+        session.add(Tokens(id_person=person.id, token=token))
+    else:
+        # Rotate the token and refresh its issue date.
+        existing_token.token = token
+        existing_token.date = datetime.now(timezone.utc)
 
-            
-            
-
-
-
-
+    session.commit()
+    return {"token": token}

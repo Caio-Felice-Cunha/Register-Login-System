@@ -1,38 +1,54 @@
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey,DateTime
-#from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import declarative_base
-from sqlalchemy.orm import sessionmaker
-#import datetime
+"""Database models and engine setup for the register/login system.
+
+A single SQLAlchemy engine and sessionmaker are created here and reused by the
+application. The connection string can be overridden with the DATABASE_URL
+environment variable; it defaults to a local SQLite file (userDB.db).
+"""
+
+import os
+
+from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    create_engine,
+)
+from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timezone
 
-USER = 'root'
-PASSWD = ''
-HOST = 'localhost'
-DATABASE = 'userDB'
-PORT = '3306'
+# Connection string. Defaults to a local SQLite file. Override with DATABASE_URL
+# (for example: postgresql+psycopg://user:pass@host:5432/db).
+CONN = os.environ.get("DATABASE_URL", "sqlite:///userDB.db")
 
-#CONN = f"sqlite+pymysql://{USER}:{PASSWD}@{HOST}:{PORT}/{DATABASE}"
-CONN = f"sqlite:///{DATABASE}.db"
-
-
-engine = create_engine(CONN, echo=True)
+engine = create_engine(CONN)
 Session = sessionmaker(bind=engine)
-session = Session()
 Base = declarative_base()
 
+
 class Person(Base):
-    __tablename__ = 'Person'
-    id = Column(Integer, primary_key = True)
+    __tablename__ = "Person"
+    id = Column(Integer, primary_key=True)
     name = Column(String(50))
-    user = Column(String(20))
-    passwd = Column(String(10))
+    # Unique so the same username cannot be registered twice.
+    user = Column(String(20), unique=True, nullable=False)
+    # Stores a salted PBKDF2 hash, not the plaintext password. Widened from the
+    # original String(10) because hashes are long.
+    passwd = Column(String(255), nullable=False)
+
 
 class Tokens(Base):
-    __tablename__ = 'Tokens'
-    id = Column(Integer, primary_key = True)
-    id_person = Column(Integer, ForeignKey('Person.id'))
+    __tablename__ = "Tokens"
+    id = Column(Integer, primary_key=True)
+    id_person = Column(Integer, ForeignKey("Person.id"))
     token = Column(String(100))
-    #date = Column(DateTime, default = datetime.datetime.utcnow())
     date = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-Base.metadata.create_all(engine)
+
+def init_db():
+    """Create all tables. Idempotent."""
+    Base.metadata.create_all(engine)
+
+
+init_db()
